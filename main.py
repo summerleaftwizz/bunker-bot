@@ -1,25 +1,10 @@
-"""
-Точка входа в Telegram-бота «Бункер».
-
-Запуск: python main.py
-
-Что делает main():
-1. Настраивает логирование (файл bot.log + консоль).
-2. Загружает конфигурацию (.env) и проверяет BOT_TOKEN.
-3. Открывает соединение с SQLite и восстанавливает активные комнаты.
-4. Подключает все роутеры и middleware.
-5. Запускает фоновые задачи (таймеры обсуждения, авто-очистка).
-6. Начинает polling и корректно завершает работу (graceful shutdown).
-"""
-
-from __future__ import annotations
-
 import asyncio
 import logging
 import logging.handlers
 import sys
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError
 
@@ -60,25 +45,10 @@ def setup_logging() -> None:
     root.addHandler(console_handler)
 
 
-async def on_startup(dp: Dispatcher, bot: Bot) -> None:
-    """Старт: подключение БД, восстановление комнат, фоновые задачи."""
-    await store.connect()
-    restored = await restore_rooms()
-    logger.info("Восстановлено активных комнат: %d", restored)
-
-    dp["timers_task"] = asyncio.create_task(timers_loop(bot))
-    dp["cleanup_task"] = asyncio.create_task(cleanup_loop())
-
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-    except Exception:  # noqa: BLE001
-        logger.debug("Вебхук отсутствует — работаем в polling-режиме")
-
-
-async def on_shutdown(dp: Dispatcher, bot: Bot) -> None:
+async def on_shutdown(dispatcher: Dispatcher, bot: Bot) -> None:
     """Корректное завершение: остановка фоновых задач и закрытие БД."""
     for key in ("timers_task", "cleanup_task"):
-        task = dp.get(key)
+        task = dispatcher.get(key)
         if task is not None:
             task.cancel()
             try:
@@ -91,16 +61,28 @@ async def on_shutdown(dp: Dispatcher, bot: Bot) -> None:
     logger.info("Бот остановлен")
 
 
+async def on_startup(bot: Bot) -> None:
+    """Подключить БД, восстановить комнаты и запустить фоновые задачи."""
+    await store.connect()
+    restored = await restore_rooms()
+    if restored:
+        logger.info("Восстановлено комнат после перезапуска: %d", restored)
+    logger.info("Бот готов к работе")
+
+
 async def main() -> None:
     """Главная функция: настройка и запуск бота."""
     setup_logging()
 
     if not config.BOT_TOKEN:
-        logger.error("BOT_TOKEN не задан в .env! Скопируйте .env.example → .env")
+        logger.error("BOT_TOKEN не задан в .env! Скопируйте .env.example -> .env")
         sys.exit(1)
 
     logger.info("Инициализация бота…")
-    bot = Bot(token=config.BOT_TOKEN, parse_mode=ParseMode.HTML)
+    bot = Bot(
+        token=config.BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
     dp = Dispatcher()
 
     # middleware: антиспам + контекст БД
@@ -129,7 +111,7 @@ async def main() -> None:
     except Exception:
         logger.exception("Критическая ошибка в polling")
     finally:
-        await on_shutdown(dp, bot)
+        logger.info("Polling завершён")
 
 
 if __name__ == "__main__":

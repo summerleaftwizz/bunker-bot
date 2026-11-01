@@ -10,12 +10,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 from aiogram import Router, F
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, FSInputFile
 
 from db.store import store
 from game import engine as eng
@@ -31,6 +32,9 @@ router = Router()
 
 # deep-link вида: /start room_ABCDE
 _ROOM_LINK_RE = re.compile(r"^room_([A-HJ-NP-Z2-9]{5})$", re.IGNORECASE)
+
+# приветственная картинка (опциональна; если файла нет — шлём текст)
+_WELCOME_IMAGE = os.path.join("media", "hello.jpg")
 
 
 # ---------------------------------------------------------------------------
@@ -117,14 +121,23 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
 
 async def _show_main_menu(message: Message) -> None:
-    """Отправить главное меню."""
-    await message.answer(
+    """Отправить главное меню (с приветственной картинкой, если она есть)."""
+    caption = (
         "<b>👋 Добро пожаловать в «Бункер»</b>\n\n"
         "<i>Постапокалипсис уже случился. Осталось решить, кого взять с собой.</i>\n\n"
         "🎮 <b>Создать комнату</b> — и позвать друзей по коду или ссылке\n"
-        "🔑 <b>Войти по коду</b> — если тебя уже позвали",
-        reply_markup=main_menu(),
+        "🔑 <b>Войти по коду</b> — если тебя уже позвали"
     )
+    if os.path.exists(_WELCOME_IMAGE):
+        try:
+            photo = FSInputFile(_WELCOME_IMAGE)
+            await message.answer_photo(
+                photo, caption=caption, reply_markup=main_menu()
+            )
+            return
+        except Exception:  # noqa: BLE001 - нет картинки, не падаем
+            logger.exception("Не удалось отправить приветственную картинку")
+    await message.answer(caption, reply_markup=main_menu())
 
 
 # ---------------------------------------------------------------------------
@@ -165,15 +178,124 @@ async def cb_about(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:stats")
 async def cb_my_stats(callback: CallbackQuery) -> None:
-    """Личная статистика."""
+    """Личная статистика: игры, победы, любимая профессия, выбывания."""
     await callback.answer()
-    stats = await store.get_user_stats(callback.from_user.id)
+    profile = await store.get_player_profile(callback.from_user.id)
+    games = int(profile["games"])
+    wins = int(profile["wins"])
+    win_rate = round(wins * 100 / games, 1) if games else 0.0
+
+    lines = [
+        "<b>📊 Твоя статистика</b>",
+        "",
+        f"🎮 Сыграно игр: <b>{games}</b>",
+        f"🏆 Побед: <b>{wins}</b> <i>({win_rate}%)</i>",
+    ]
+    favorite = profile.get("favorite_profession")
+    if favorite:
+        lines.append(f"💼 Любимая профессия: <b>{_esc(favorite)}</b>")
+    lines.append(f"⚰️ Выбываний: <b>{profile.get('eliminations', 0)}</b>")
+    lines.append(f"1️⃣ Из них в первом раунде: <b>{profile.get('first_eliminations', 0)}</b>")
+
+    if not games:
+        lines.append("")
+        lines.append("<i>Ещё ни одной игры — самое время позвать друзей!</i>")
+
     await callback.message.edit_text(
-        "<b>📊 Твоя статистика</b>\n\n"
-        f"🎮 Сыграно игр: <b>{stats['games']}</b>\n"
-        f"🏆 Побед: <b>{stats['wins']}</b>",
-        reply_markup=back_to_menu(),
+        "\n".join(lines), reply_markup=back_to_menu()
     )
+
+
+@router.callback_query(F.data == "menu:top")
+async def cb_top_players(callback: CallbackQuery) -> None:
+    """Топ игроков по победам."""
+    await callback.answer()
+    top = await store.get_top_players(limit=10)
+    if not top:
+        await callback.message.edit_text(
+            "<b>🏆 Топ игроков</b>\n\n<i>Пока никто не сыграл. Будь первым!</i>",
+            reply_markup=back_to_menu(),
+        )
+        return
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    lines = ["<b>🏆 Топ игроков</b>", ""]
+    for row in top:
+        place = row["place"]
+        medal = medals.get(place, f"{place}.")
+        name = f"id{row['user_id']}"
+        lines.append(
+            f"{medal} <b>{name}</b> — {row['wins']}п / {row['games']}и "
+            f"({row['win_rate']}%)"
+        )
+    await callback.message.edit_text("\n".join(lines), reply_markup=back_to_menu())
+
+
+@router.callback_query(F.data == "menu:history")
+async def cb_history(callback: CallbackQuery) -> None:
+    """История последних игр на сервере."""
+    await callback.answer()
+    games = await store.get_recent_games(limit=5)
+    if not games:
+        await callback.message.edit_text(
+            "<b>🧾 Последние игры</b>\n\n<i>История пока пуста.</i>",
+            reply_markup=back_to_menu(),
+        )
+        return
+    lines = ["<b>🧾 Последние игры</b>", ""]
+    for game in games:
+        survivors = ", ".join(game["survivors"]) or "—"
+        lines.append(
+            f"☢️ <b>{_esc(game['disaster'])}</b>\n"
+            f"  🚪 Выжили ({len(game['survivors'])} из {game['players_count']}): "
+            f"{_esc(survivors)}"
+        )
+    await callback.message.edit_text("\n".join(lines), reply_markup=back_to_menu())
+
+
+@router.callback_query(F.data == "menu:my_games")
+async def cb_my_games(callback: CallbackQuery) -> None:
+    """Активная комната игрока: код и ссылка-приглашение, либо подсказка."""
+    await callback.answer()
+    user_id = callback.from_user.id
+    room = get_by_user(user_id)
+    if room is None:
+        code = await store.get_user_room_code(user_id)
+        if code:
+            room = get(code) or await store.get_room_by_code(code)
+            if room is not None:
+                from game.registry import register
+                register(room)
+    if room is None:
+        await callback.message.edit_text(
+            "<b>🎮 Мои игры</b>\n\n<i>Сейчас ты не в игре.\n"
+            "Создай комнату или войди по коду.</i>",
+            reply_markup=back_to_menu(),
+        )
+        return
+
+    phase_names = {
+        Phase.LOBBY: "лобби — ждём игроков",
+        Phase.REVEAL: "раскрытие карт",
+        Phase.DISCUSSION: "обсуждение",
+        Phase.VOTING: "голосование",
+        Phase.RESULT: "результат голосования",
+        Phase.FINISHED: "игра завершена",
+    }
+    player = room.players.get(user_id)
+    lines = [
+        "<b>🎮 Твоя игра</b>",
+        "",
+        f"🏠 Комната: <code>{room.code}</code>",
+        f"📍 Статус: <b>{phase_names.get(room.phase, room.phase.value)}</b>",
+        f"🔁 Раунд: <b>{room.round_no}</b>",
+    ]
+    if player is not None:
+        status = "в игре" if player.alive else "выбыл"
+        lines.append(f"🫵 Ты: <b>{status}</b>")
+    lines.append("")
+    lines.append("<i>Кнопки игры — в личном экране комнаты. Если потерял его, "
+                 "нажми «Войти по коду» и введи код комнаты.</i>")
+    await callback.message.edit_text("\n".join(lines), reply_markup=back_to_menu())
 
 
 @router.callback_query(F.data == "menu:back")

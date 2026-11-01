@@ -30,11 +30,22 @@ def lobby(room, viewer_id: int) -> InlineKeyboardMarkup:
         for p in sorted(room.players.values(), key=lambda x: x.join_index):
             if p.user_id == viewer_id:
                 continue
-            builder.row(_btn(f"🚫 Кикнуть {p.full_name}", f"lobby:kick:{p.user_id}"))
+            builder.row(_btn(f"🚫 Кикнуть {p.full_name}", f"lobby:kickq:{p.user_id}"))
     else:
         builder.row(_btn("🔔 Позвать хоста", "lobby:ping_host"))
 
+    builder.row(_btn("🔗 Пригласить друга", "lobby:invite"))
     builder.row(_btn("🚪 Выйти", "lobby:leave"))
+    return builder.as_markup()
+
+
+def kick_confirm(target_id: int, target_name: str) -> InlineKeyboardMarkup:
+    """Подтверждение кика: случайное нажатие не выгонит игрока."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        _btn(f"✅ Да, кикнуть {target_name}", f"lobby:kick:{target_id}"),
+    )
+    builder.row(_btn("❌ Отмена", "lobby:show"))
     return builder.as_markup()
 
 

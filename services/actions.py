@@ -23,7 +23,7 @@ from game.state import (
     SPECIAL,
     theme_for_round,
 )
-from data.special_cards import SPECIAL_CARDS_MAP
+from gamedata.special_cards import SPECIAL_CARDS_MAP
 from keyboards import (
     card_screen,
     voting,
@@ -253,7 +253,7 @@ async def start_game(bot: Bot, room) -> None:
 
 
 async def begin_reveal_round(bot: Bot, room) -> None:
-    """Начать раунд раскрытия: объявить тему и разослать карточки."""
+    """Начать раунд раскрытия: объявить тему, ход и разослать карточки."""
     await announce(
         bot,
         room,
@@ -262,7 +262,101 @@ async def begin_reveal_round(bot: Bot, room) -> None:
         f"<i>Каждый живой игрок раскрывает одну карту.</i>",
     )
     await send_card_screens_to_all(bot, room)
+    await announce_next_turn(bot, room)
     await store.save_room(room)
+
+
+async def announce_next_turn(bot: Bot, room) -> None:
+    """Объявить, чей сейчас ход раскрытия (случайный порядок ускоряет игру)."""
+    if room.phase != Phase.REVEAL or room.paused:
+        return
+    player = eng.pending_turn_player(room)
+    if player is None:
+        return
+    await announce(
+        bot,
+        room,
+        f"⏳ <b>Сейчас ход у {esc(player.full_name)}.</b>\n"
+        f"<i>Раскрой карту: <b>{theme_label(room)}</b>.</i>",
+    )
+
+
+async def set_paused(bot: Bot, room, host_id: int) -> bool:
+    """
+    Переключить паузу. Возвращает True, если игра теперь на паузе.
+
+    Бросает eng.GameError, если действие недоступно.
+    """
+    if room.paused:
+        eng.resume_game(room, host_id)
+        await store.save_room(room)
+        await announce(
+            bot, room,
+            "▶️ <b>Игра продолжается!</b>\n<i>Голосование снова открыто.</i>",
+            only_alive=True,
+        )
+        return False
+    eng.pause_game(room, host_id)
+    await store.save_room(room)
+    await announce(
+        bot, room,
+        "⏸ <b>Игра на паузе</b>\n<i>Голоса не принимаются. Хост может продолжить, "
+        "когда все будут готовы.</i>",
+        only_alive=True,
+    )
+    return True
+
+
+def players_list_text(room, page: int = 0, per_page: int = 8) -> tuple[str, int]:
+    """
+    Список игроков «Кто в игре» с пагинацией.
+
+    Возвращает (текст, число страниц). Хост помечается 👑, живые — 🟢,
+    выбывшие — ⚰️, отключённые — 📴.
+    """
+    ordered = sorted(room.players.values(), key=lambda p: p.join_index)
+    pages = max(1, -(-len(ordered) // per_page))
+    page = max(0, min(page, pages - 1))
+    chunk = ordered[page * per_page:(page + 1) * per_page]
+
+    lines = ["👥 <b>Кто в игре</b>", ""]
+    for p in chunk:
+        if p.is_host:
+            mark = "👑"
+        elif not p.alive:
+            mark = "⚰️"
+        elif p.disconnected:
+            mark = "📴"
+        else:
+            mark = "🟢"
+        status = "" if p.alive else " <i>(выбыл)</i>"
+        lines.append(f"  {mark} {esc(p.full_name)}{status}")
+
+    alive_count = len(room.alive_players)
+    lines.append("")
+    lines.append(
+        f"🟢 Живых: <b>{alive_count}</b> · ⚰️ Выбыло: "
+        f"<b>{len(ordered) - alive_count}</b>"
+    )
+    if pages > 1:
+        lines.append(f"📄 Страница {page + 1}/{pages}")
+    return "\n".join(lines), pages
+
+
+def players_list_keyboard(page: int, pages: int) -> "InlineKeyboardMarkup | None":
+    """Кнопки пагинации для списка игроков (None, если страница одна)."""
+    if pages <= 1:
+        return None
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="⬅️ Назад", callback_data=f"who:page:{max(0, page - 1)}"
+        ),
+        InlineKeyboardButton(
+            text="Вперед ➡️", callback_data=f"who:page:{min(pages - 1, page + 1)}"
+        ),
+    ]])
 
 
 async def after_reveal(bot: Bot, room, player, attr: str) -> None:
@@ -274,6 +368,7 @@ async def after_reveal(bot: Bot, room, player, attr: str) -> None:
         await begin_discussion(bot, room)
     else:
         await store.save_room(room)
+        await announce_next_turn(bot, room)
 
 
 async def begin_discussion(bot: Bot, room) -> None:
@@ -456,6 +551,7 @@ async def finish_game(bot: Bot, room) -> None:
             "full_name": p.full_name,
             "won": won,
             "cards": p.cards,
+            "eliminated_round": p.eliminated_round,
         })
 
     try:

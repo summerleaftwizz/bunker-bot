@@ -1,7 +1,7 @@
 """
 Генерация и раздача карт игрокам.
 
-Все списки берутся из пакета data/. Карты перемешиваются через random.Random
+Все списки берутся из пакета gamedata/. Карты перемешиваются через random.Random
 с отдельным зерном на комнату, чтобы результат был детерминированным
 и воспроизводимым при рестарте.
 """
@@ -22,13 +22,13 @@ from game.state import (
     SPECIAL,
 )
 
-from data.professions import PROFESSIONS
-from data.health import HEALTH_STATES
-from data.hobbies import HOBBIES
-from data.phobias import PHOBIAS
-from data.baggages import BAGGAGES
-from data.facts import FACTS
-from data.special_cards import SPECIAL_CARDS
+from gamedata.professions import PROFESSIONS
+from gamedata.health import HEALTH_STATES
+from gamedata.hobbies import HOBBIES
+from gamedata.phobias import PHOBIAS
+from gamedata.baggages import BAGGAGES
+from gamedata.facts import FACTS
+from gamedata.special_cards import SPECIAL_CARDS
 
 
 class Deck:

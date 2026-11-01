@@ -10,12 +10,13 @@ from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from data.special_cards import SPECIAL_CARDS_MAP  # noqa: F401 (используется в game.py)
+from gamedata.special_cards import SPECIAL_CARDS_MAP  # noqa: F401 (используется в game.py)
 from db.store import store
 from game import engine as eng
 from game.registry import register, get, get_by_user, lock_for, unregister
 from game.state import Phase, MIN_PLAYERS, MAX_PLAYERS
 from keyboards import room_screen, lobby, main_menu, back_to_menu
+from keyboards.lobby import kick_confirm
 from services import actions
 from services.notifier import safe_send, broadcast_to_room
 from states import Form
@@ -184,6 +185,26 @@ async def cb_room_close(callback: CallbackQuery) -> None:
 # ---------------------------------------------------------------------------
 # Лобби: показ, выход, кик, пинг хоста
 # ---------------------------------------------------------------------------
+@router.callback_query(F.data == "lobby:invite")
+async def cb_lobby_invite(callback: CallbackQuery) -> None:
+    """Показать ссылку-приглашение в комнату."""
+    room = get_by_user(callback.from_user.id)
+    if room is None:
+        await callback.answer("❌ Комната не найдена.", show_alert=True)
+        return
+    await callback.answer()
+    bot_info = await callback.bot.get_me()
+    invite = f"https://t.me/{bot_info.username}?start=room_{room.code}"
+    await callback.message.edit_text(
+        f"🔗 <b>Пригласить друга</b>\n\n"
+        f"Просто отправь другу этот код или ссылку:\n\n"
+        f"Код: <code>{room.code}</code>\n"
+        f"Ссылка: <code>{invite}</code>\n\n"
+        f"<i>Вход по ссылке работает только пока игра в лобби и есть свободные места.</i>",
+        reply_markup=lobby(room, callback.from_user.id),
+    )
+
+
 @router.callback_query(F.data == "lobby:show")
 async def cb_lobby_show(callback: CallbackQuery) -> None:
     """Показать лобби (обычно после возврата из настроек)."""
@@ -250,6 +271,31 @@ async def cb_lobby_leave(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
         "🚪 <b>Ты вышел из комнаты.</b>",
         reply_markup=main_menu(),
+    )
+
+
+@router.callback_query(F.data.startswith("lobby:kickq:"))
+async def cb_lobby_kick_confirm(callback: CallbackQuery) -> None:
+    """Спросить подтверждение перед киком (защита от случайного нажатия)."""
+    room = _host_room(callback)
+    if room is None:
+        await callback.answer("❌ Кикать может только хост.", show_alert=True)
+        return
+
+    try:
+        target_id = int(callback.data.rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer("❌ Ошибка.", show_alert=True)
+        return
+
+    target = room.players.get(target_id)
+    if target is None:
+        await callback.answer("❌ Игрок уже вышел.", show_alert=True)
+        return
+
+    await callback.answer()
+    await callback.message.edit_reply_markup(
+        reply_markup=kick_confirm(target_id, target.full_name)
     )
 
 

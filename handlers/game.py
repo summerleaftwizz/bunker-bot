@@ -10,10 +10,11 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from db.store import store
-from data.special_cards import SPECIAL_CARDS_MAP
+from gamedata.special_cards import SPECIAL_CARDS_MAP
 from game import engine as eng
 from game.registry import get_by_user, lock_for
 from keyboards import card_screen, special_targets, special_confirm
+from services import actions
 from services.actions import (
     upsert_screen,
     card_screen_text,
@@ -107,6 +108,116 @@ async def cb_game_menu(callback: CallbackQuery) -> None:
         callback.from_user.id,
         "🏠 <b>Меню игры</b>\n\n<i>Выбери, что показать.</i>",
         kb,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Кто в игре (с пагинацией)
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data == "game:who")
+async def cb_who_is_here(callback: CallbackQuery) -> None:
+    """Показать список игроков: кто жив, кто выбыл."""
+    room = get_by_user(callback.from_user.id)
+    if room is None:
+        await callback.answer("❌ Комната не найдена.", show_alert=True)
+        return
+    await callback.answer()
+    text, pages = actions.players_list_text(room, page=0)
+    await upsert_screen(
+        callback.bot, room, callback.from_user.id, text,
+        actions.players_list_keyboard(0, pages),
+    )
+
+
+@router.callback_query(F.data.startswith("who:page:"))
+async def cb_who_page(callback: CallbackQuery) -> None:
+    """Страница списка игроков."""
+    room = get_by_user(callback.from_user.id)
+    if room is None:
+        await callback.answer("❌ Комната не найдена.", show_alert=True)
+        return
+    try:
+        page = int(callback.data.rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        page = 0
+    await callback.answer()
+    text, pages = actions.players_list_text(room, page=page)
+    await upsert_screen(
+        callback.bot, room, callback.from_user.id, text,
+        actions.players_list_keyboard(page, pages),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Карты картинкой (Pillow) и пауза
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data == "game:img")
+async def cb_card_image(callback: CallbackQuery) -> None:
+    """Отправить карточку игрока PNG-картинкой (или текстом, если Pillow нет)."""
+    room = get_by_user(callback.from_user.id)
+    if room is None:
+        await callback.answer("❌ Комната не найдена.", show_alert=True)
+        return
+    await callback.answer()
+
+    player = room.players.get(callback.from_user.id)
+    if player is None:
+        return
+
+    from services.cards_image import render_player_card
+
+    png = render_player_card(player, room_code=room.code)
+    if png is None:
+        await upsert_screen(
+            callback.bot, room, callback.from_user.id,
+            card_screen_text(room, callback.from_user.id),
+            card_screen(room, callback.from_user.id),
+        )
+        return
+
+    from aiogram.types import BufferedInputFile
+
+    photo = BufferedInputFile(png, filename=f"card_{room.code}.png")
+    try:
+        await callback.bot.send_photo(
+            callback.from_user.id, photo,
+            caption=f"🃏 Досье игрока <b>{actions.esc(player.full_name)}</b> "
+                    f"· комната <code>{room.code}</code>",
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Не удалось отправить PNG-карточку")
+        await upsert_screen(
+            callback.bot, room, callback.from_user.id,
+            card_screen_text(room, callback.from_user.id),
+            card_screen(room, callback.from_user.id),
+        )
+
+
+@router.callback_query(F.data == "game:pause")
+async def cb_pause_toggle(callback: CallbackQuery) -> None:
+    """Хост ставит игру на паузу или снимает её."""
+    room = get_by_user(callback.from_user.id)
+    if room is None:
+        await callback.answer("❌ Комната не найдена.", show_alert=True)
+        return
+    if room.host_id != callback.from_user.id:
+        await callback.answer("❌ Пауза доступна только хосту.", show_alert=True)
+        return
+
+    async with lock_for(room.code):
+        try:
+            await actions.set_paused(callback.bot, room, callback.from_user.id)
+        except eng.GameError as exc:
+            await callback.answer(f"❌ {exc}", show_alert=True)
+            return
+        await upsert_screen(
+            callback.bot, room, callback.from_user.id,
+            card_screen_text(room, callback.from_user.id),
+            card_screen(room, callback.from_user.id),
+        )
+
+    await callback.answer(
+        "▶️ Игра продолжается" if not room.paused else "⏸ Пауза"
     )
 
 

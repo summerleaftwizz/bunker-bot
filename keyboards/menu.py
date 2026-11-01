@@ -13,7 +13,7 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
 
 
 def main_menu() -> InlineKeyboardMarkup:
-    """Главное меню бота (2 кнопки в ряд)."""
+    """Главное меню бота."""
     builder = InlineKeyboardBuilder()
     builder.row(
         _btn("🎮 Создать комнату", "menu:create"),
@@ -21,9 +21,16 @@ def main_menu() -> InlineKeyboardMarkup:
     )
     builder.row(
         _btn("📜 Правила", "menu:rules"),
-        _btn("📊 Мои игры", "menu:stats"),
+        _btn("🎮 Мои игры", "menu:my_games"),
     )
-    builder.row(_btn("ℹ️ О боте", "menu:about"))
+    builder.row(
+        _btn("📊 Статистика", "menu:stats"),
+        _btn("🏆 Топ игроков", "menu:top"),
+    )
+    builder.row(
+        _btn("🧾 История игр", "menu:history"),
+        _btn("ℹ️ О боте", "menu:about"),
+    )
     return builder.as_markup()
 
 

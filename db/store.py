@@ -284,6 +284,113 @@ class Store:
         )
         await self.conn.commit()
 
+    async def get_player_profile(self, user_id: int) -> dict[str, object]:
+        """
+        Подробный профиль игрока: игры, победы, любимая профессия,
+        сколько раз выбывал и сколько раз выбывал первым.
+        """
+        stats = await self.get_user_stats(user_id)
+        games = int(stats.get("games", 0))
+        wins = int(stats.get("wins", 0))
+
+        cursor = await self.conn.execute(
+            "SELECT players_json FROM games_log ORDER BY finished_at DESC LIMIT 300"
+        )
+        rows = await cursor.fetchall()
+
+        professions: dict[str, int] = {}
+        eliminations = 0
+        first_eliminations = 0
+        played = 0
+
+        for row in rows:
+            try:
+                players = json.loads(row["players_json"] or "[]")
+            except Exception:  # noqa: BLE001
+                continue
+            for p in players:
+                if int(p.get("user_id", -1)) != user_id:
+                    continue
+                played += 1
+                prof = str((p.get("cards") or {}).get("profession", "")).strip()
+                if prof:
+                    professions[prof] = professions.get(prof, 0) + 1
+                eliminated_round = int(p.get("eliminated_round", 0) or 0)
+                if not p.get("won", False) and eliminated_round > 0:
+                    eliminations += 1
+                    if eliminated_round == 1:
+                        first_eliminations += 1
+                break
+
+        favorite = ""
+        if professions:
+            favorite = max(professions.items(), key=lambda kv: kv[1])[0]
+
+        return {
+            "games": max(games, played),
+            "wins": wins,
+            "favorite_profession": favorite,
+            "eliminations": eliminations,
+            "first_eliminations": first_eliminations,
+        }
+
+    async def get_top_players(self, limit: int = 10) -> list[dict[str, object]]:
+        """Топ игроков по победам (при равенстве — по числу игр)."""
+        cursor = await self.conn.execute(
+            """
+            SELECT user_id, games, wins FROM user_stats
+            WHERE games > 0
+            ORDER BY wins DESC, games ASC, user_id ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        result: list[dict[str, object]] = []
+        for index, row in enumerate(rows, start=1):
+            games = int(row["games"])
+            wins = int(row["wins"])
+            result.append({
+                "place": index,
+                "user_id": row["user_id"],
+                "games": games,
+                "wins": wins,
+                "win_rate": round(wins * 100 / games, 1) if games else 0.0,
+            })
+        return result
+
+    async def get_recent_games(self, limit: int = 5) -> list[dict[str, object]]:
+        """Последние завершённые игры."""
+        cursor = await self.conn.execute(
+            """
+            SELECT code, finished_at, disaster, survivors_json, players_json
+            FROM games_log ORDER BY finished_at DESC LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        games: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                survivors = json.loads(row["survivors_json"] or "[]")
+                players = json.loads(row["players_json"] or "[]")
+            except Exception:  # noqa: BLE001
+                continue
+            survivor_ids = {int(x) for x in survivors}
+            names = [
+                str(p.get("full_name", "?"))
+                for p in players
+                if int(p.get("user_id", -1)) in survivor_ids
+            ]
+            games.append({
+                "code": row["code"],
+                "finished_at": float(row["finished_at"]),
+                "disaster": row["disaster"] or "",
+                "survivors": names,
+                "players_count": len(players),
+            })
+        return games
+
     async def totals(self) -> dict[str, int]:
         """Общая статистика для /stats."""
         rooms_cursor = await self.conn.execute("SELECT COUNT(*) AS c FROM rooms")

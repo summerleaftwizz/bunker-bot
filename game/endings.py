@@ -182,3 +182,110 @@ def _esc(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+# ---------------------------------------------------------------------------
+# Сюжетный финал: мини-рассказ о первых месяцах в бункере
+# ---------------------------------------------------------------------------
+# Ключ навыка -> как этот человек меняет жизнь бункера (фраза-вклад)
+_STORY_CONTRIBUTIONS: dict[str, str] = {
+    "medic": "лечил раны и однажды вытащил с того света сразу двоих",
+    "engineer": "чинил генератор по ночам и научил остальных не бояться проводов",
+    "food": "умудрялся готовить что-то съедобное даже из последних банок",
+    "security": "обходил периметр дважды в сутки и не пропускал ни одного шороха",
+    "science": "вёл записи, благодаря которым бункер перестал работать наугад",
+    "morale": "рассказывал истории, когда все уже были готовы сдаться",
+    "hands": "превращал сломанные вещи в нужные — от полки до водяного фильтра",
+}
+
+# Атмосферные зачины, зависящие от числа выживших
+_STORY_OPENINGS: dict[int, str] = {
+    0: "Дверь бункера закрылась, и снаружи не осталось никого, кто мог бы её открыть.",
+    1: "В бункере остался один человек — и тишина, слишком громкая даже для подземелья.",
+}
+
+_STORY_MIDDLE = [
+    "Первые недели прошли в спорах о том, кто прав, и в тихой радости, что дверь выдержала.",
+    "Поначалу все вздрагивали от каждого звука снаружи, потом привыкли — и это оказалось страшнее.",
+    "Они делили пайки по часам, а по вечерам считали дни до конца запасов.",
+]
+
+_STORY_ENDINGS = [
+    "Когда-нибудь они выйдут наружу — если найдут в себе силы открыть дверь.",
+    "Внизу уже почти получилась община: с календарём, очередью на душ и своим фольклором.",
+    "Легенды об этих месяцах будут пересказывать ещё долго, каждый раз с новыми подробностями.",
+]
+
+
+def compose_story(room: "GameRoom") -> str:
+    """
+    Мини-рассказ о том, как сложилась жизнь в бункере.
+
+    Зависит от профессий выживших: врач, инженер, повар и прочие навыки
+    меняют судьбу убежища. Возвращает HTML-текст.
+    """
+    survivors = [room.players[uid] for uid in room.winner_ids if uid in room.players]
+
+    if not survivors:
+        return (
+            "📖 <b>Эпилог</b>\n\n"
+            "Бункер остался пуст. Через несколько недель снаружи постучали, "
+            "но открывать было некому — и стук стих."
+        )
+
+    professions = _professions_of(room)
+    skills = _detect_skills(professions)
+    rng = random.Random(f"{room.code}:story:{len(survivors)}")
+
+    names = ", ".join(_esc(p.full_name) for p in survivors)
+    parts: list[str] = ["📖 <b>Эпилог</b>", ""]
+
+    opening = _STORY_OPENINGS.get(len(survivors))
+    if opening:
+        parts.append(opening)
+    else:
+        parts.append(
+            f"Дверь бункера закрылась за спинами {len(survivors)} "
+            f"{'человека' if len(survivors) < 5 else 'человек'}."
+        )
+
+    parts.append(rng.choice(_STORY_MIDDLE))
+
+    if skills:
+        contribs: list[str] = []
+        for key, effect in skills:
+            keywords = next(kws for k, kws, _ in SKILL_GROUPS if k == key)
+            for p in survivors:
+                prof = p.cards.get("profession", "").lower()
+                if any(kw in prof for kw in keywords):
+                    contribs.append(
+                        f"{_esc(p.full_name)} {_STORY_CONTRIBUTIONS.get(key, effect)}"
+                    )
+        if contribs:
+            parts.append(
+                "Особенно запомнились те, кто взял на себя главное: "
+                + "; ".join(contribs[:4]) + "."
+            )
+
+        missing = {"medic", "engineer", "food"} - {key for key, _ in skills}
+        if missing:
+            gaps = {
+                "medic": "болезни лечили народными методами, и не всегда удачно",
+                "engineer": "вода и свет держались на честном слове",
+                "food": "запасы таяли быстрее, чем хотелось бы",
+            }
+            parts.append(
+                "Но были и потери: "
+                + "; ".join(gaps[key] for key in sorted(missing)) + "."
+            )
+    else:
+        parts.append(
+            "Профессий у выживших почти не было — бункер держался на изоленте, "
+            "упрямстве и умении договариваться."
+        )
+
+    parts.append("")
+    parts.append(f"<i>Те, кто остался снаружи: {names}.</i>")
+    parts.append(rng.choice(_STORY_ENDINGS))
+
+    return "\n".join(parts)

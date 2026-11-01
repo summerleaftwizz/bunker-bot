@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from game.state import CARD_ICONS, CARD_LABELS, Phase, theme_for_round, SPECIAL
-from data.special_cards import SPECIAL_CARDS_MAP
+from gamedata.special_cards import SPECIAL_CARDS_MAP
 
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
@@ -53,9 +53,21 @@ def card_screen(room, viewer_id: int) -> InlineKeyboardMarkup:
     if room.phase == Phase.VOTING and player.alive:
         builder.row(_btn("🗳 Голосовать", "vote:info"))
 
+    # пауза — только хост и только в идущей игре
+    if viewer_id == room.host_id and \
+            room.phase not in (Phase.LOBBY, Phase.FINISHED):
+        builder.row(_btn(
+            "▶️ Продолжить игру" if room.paused else "⏸ Пауза",
+            "game:pause",
+        ))
+
     builder.row(
         _btn("📜 Катастрофа", "game:mission"),
         _btn("🏚 Бункер", "game:bunker"),
+    )
+    builder.row(
+        _btn("👥 Кто в игре", "game:who"),
+        _btn("🖼 Карты картинкой", "game:img"),
     )
     builder.row(_btn("🔄 Обновить", "game:cards"))
     return builder.as_markup()

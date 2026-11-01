@@ -31,9 +31,9 @@ from game.state import (
 from game.cards import Deck
 from game import endings
 
-from data.disasters import DISASTERS
-from data.bunkers import BUNKER_NAMES, BUNKER_FEATURES
-from data.special_cards import SPECIAL_CARDS_MAP
+from gamedata.disasters import DISASTERS
+from gamedata.bunkers import BUNKER_NAMES, BUNKER_FEATURES
+from gamedata.special_cards import SPECIAL_CARDS_MAP
 
 
 class GameError(Exception):
@@ -65,6 +65,22 @@ class PlayerState:
     sabotage_target: bool = False     # чей голос отменён
     muted_until_round: int = 0        # не голосует в раундах <= этого
     join_index: int = 0               # порядок вступления (для смены хоста)
+    # в каком раунде выбыл (0 — выжил); нужно для статистики
+    eliminated_round: int = 0
+
+    @property
+    def is_active(self) -> bool:
+        """
+        Игрок на связи.
+
+        Спецификация требует помечать отключённых как is_active=False,
+        поэтому это булев «живой контакт» поверх флага disconnected.
+        """
+        return not self.disconnected
+
+    @is_active.setter
+    def is_active(self, value: bool) -> None:
+        self.disconnected = not value
 
     def hidden_cards(self) -> list[str]:
         """Список не раскрытых типов карт."""
@@ -96,6 +112,7 @@ class PlayerState:
             "sabotage_target": self.sabotage_target,
             "muted_until_round": self.muted_until_round,
             "join_index": self.join_index,
+            "eliminated_round": self.eliminated_round,
         }
 
     @classmethod
@@ -117,6 +134,7 @@ class PlayerState:
             sabotage_target=bool(data.get("sabotage_target", False)),
             muted_until_round=int(data.get("muted_until_round", 0)),
             join_index=int(data.get("join_index", 0)),
+            eliminated_round=int(data.get("eliminated_round", 0)),
         )
 
 
@@ -144,6 +162,8 @@ class GameRoom:
     tie_leaders: list[int] = field(default_factory=list)
     winner_ids: list[int] = field(default_factory=list)
     finish_text: str = ""
+    # игра на паузе (ставит хост): голоса не принимаются
+    paused: bool = False
     # id служебных сообщений в ЛС игроков: user_id -> message_id
     # нужно, чтобы лобби/экраны обновлялись через edit_message, а не спамили
     ui_msg: dict[int, int] = field(default_factory=dict)
@@ -187,6 +207,7 @@ class GameRoom:
             "tie_leaders": self.tie_leaders,
             "winner_ids": self.winner_ids,
             "finish_text": self.finish_text,
+            "paused": self.paused,
             "ui_msg": {str(uid): mid for uid, mid in self.ui_msg.items()},
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -212,6 +233,7 @@ class GameRoom:
             tie_leaders=list(data.get("tie_leaders", [])),
             winner_ids=list(data.get("winner_ids", [])),
             finish_text=str(data.get("finish_text", "")),
+            paused=bool(data.get("paused", False)),
             ui_msg={int(k): int(v) for k, v in dict(data.get("ui_msg", {})).items()},
             created_at=float(data.get("created_at", time.time())),
             updated_at=float(data.get("updated_at", time.time())),
@@ -426,6 +448,45 @@ def goto_discussion(room: GameRoom, now: float | None = None) -> None:
     room.touch()
 
 
+# ---------------------------------------------------------------------------
+# Пауза и порядок раскрытия
+# ---------------------------------------------------------------------------
+def pause_game(room: GameRoom, host_id: int) -> None:
+    """Поставить игру на паузу (только хост, только в идущей игре)."""
+    if room.host_id != host_id:
+        raise GameError("Поставить игру на паузу может только хост.")
+    if room.phase in (Phase.LOBBY, Phase.FINISHED):
+        raise GameError("Игра ещё не началась или уже закончилась.")
+    if room.paused:
+        raise GameError("Игра уже на паузе.")
+    room.paused = True
+    room.touch()
+
+
+def resume_game(room: GameRoom, host_id: int) -> None:
+    """Снять игру с паузы (только хост)."""
+    if room.host_id != host_id:
+        raise GameError("Снять паузу может только хост.")
+    if not room.paused:
+        raise GameError("Игра не на паузе.")
+    room.paused = False
+    room.touch()
+
+
+def pending_turn_player(room: GameRoom) -> Optional[PlayerState]:
+    """
+    Игрок, чей сейчас ход: случайный живой участник, ещё не раскрывший карту
+    в этом раунде. None — если раскрывать больше некому.
+    """
+    candidates = [
+        p for p in room.alive_players
+        if p.hidden_cards() and room.round_reveals.get(p.user_id, 0) < 1
+    ]
+    if not candidates:
+        return None
+    return random.choice(candidates)
+
+
 def open_voting(room: GameRoom) -> None:
     """
     Открыть голосование.
@@ -465,6 +526,8 @@ def vote(room: GameRoom, voter_id: int, target_id: int) -> None:
     """
     if room.phase != Phase.VOTING:
         raise GameError("Сейчас не идёт голосование.")
+    if room.paused:
+        raise GameError("Игра на паузе — голосование временно недоступно.")
     voter = room.get_player(voter_id)
     if not voter.alive:
         raise GameError("Выбывшие игроки не голосуют.")
@@ -572,6 +635,7 @@ def eliminate(room: GameRoom, target_id: int) -> None:
     """Выбывание игрока: раскрыть все его карты, передать хостство при необходимости."""
     player = room.get_player(target_id)
     player.alive = False
+    player.eliminated_round = room.round_no
     # раскрываем все оставшиеся карты выбывшего
     for attr in player.hidden_cards():
         player.revealed.append(attr)
@@ -602,7 +666,9 @@ def continue_after_result(room: GameRoom) -> bool:
     alive = [p for p in room.players.values() if p.alive]
     if len(alive) == room.capacity:
         room.winner_ids = [p.user_id for p in alive]
-        room.finish_text = endings.compose_ending(room)
+        room.finish_text = (
+            endings.compose_ending(room) + "\n\n" + endings.compose_story(room)
+        )
         room.phase = Phase.FINISHED
         return True
 
